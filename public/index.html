@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>X-Live Recording Processor</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f4f4f9;
+        }
+        h1 {
+            color: #333;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .logs-container {
+            margin-top: 20px;
+            background: #222;
+            color: #0f0;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            font-family: monospace;
+            border-radius: 4px;
+        }
+        .log-line {
+            margin: 2px 0;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>X-Live Recording Processor</h1>
+    <p>Enter the absolute directory paths for the SD card folders and the output destination.</p>
+
+    <div class="form-group">
+        <label for="card1">First Card Directory (Required):</label>
+        <input type="text" id="card1" placeholder="/path/to/card1">
+    </div>
+
+    <div class="form-group">
+        <label for="card2">Second Card Directory (Optional):</label>
+        <input type="text" id="card2" placeholder="/path/to/card2">
+    </div>
+
+    <div class="form-group">
+        <label for="output">Output Directory (Required):</label>
+        <input type="text" id="output" placeholder="/path/to/output">
+    </div>
+
+    <button id="processBtn">Start Processing</button>
+
+    <div class="logs-container" id="logs"></div>
+
+    <script>
+        const btn = document.getElementById('processBtn');
+        const logsDiv = document.getElementById('logs');
+        let evtSource = null;
+
+        function appendLog(message, isError = false) {
+            const div = document.createElement('div');
+            div.className = 'log-line';
+            div.textContent = message;
+            if (isError) {
+                div.style.color = '#ff4444';
+            }
+            logsDiv.appendChild(div);
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+
+        btn.addEventListener('click', () => {
+            const card1 = document.getElementById('card1').value.trim();
+            const card2 = document.getElementById('card2').value.trim();
+            const output = document.getElementById('output').value.trim();
+
+            if (!card1 || !output) {
+                alert('First Card Directory and Output Directory are required.');
+                return;
+            }
+
+            btn.disabled = true;
+            logsDiv.innerHTML = '';
+            appendLog('Starting processing...');
+
+            const url = `/process?card1=${encodeURIComponent(card1)}&card2=${encodeURIComponent(card2)}&output=${encodeURIComponent(output)}`;
+
+            if (evtSource) {
+                evtSource.close();
+            }
+
+            evtSource = new EventSource(url);
+
+            evtSource.onmessage = (event) => {
+                appendLog(event.data);
+            };
+
+            evtSource.addEventListener('errorMsg', (event) => {
+                appendLog(`ERROR: ${event.data}`, true);
+            });
+
+            evtSource.addEventListener('done', (event) => {
+                appendLog('Processing finished.');
+                btn.disabled = false;
+                evtSource.close();
+            });
+
+            evtSource.onerror = (err) => {
+                appendLog('Connection error or processing failed unexpectedly.', true);
+                btn.disabled = false;
+                evtSource.close();
+            };
+        });
+    </script>
+</body>
+</html>
