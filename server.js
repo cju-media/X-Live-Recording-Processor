@@ -9,23 +9,28 @@ const PORT = 3000;
 app.use(express.static(path.join(__dirname, 'public')));
 
 function cleanPath(inputPath) {
-    return inputPath ? inputPath.trim().replace(/^['"](.*)['"]$/, '$1').trim() : '';
+    if (!inputPath) return '';
+    let p = inputPath.trim().replace(/^['"](.*)['"]$/, '$1').trim();
+    if (p.startsWith('file://')) {
+        p = p.substring(7);
+        // decode URI components in case spaces are %20
+        try { p = decodeURI(p); } catch(e) {}
+    }
+    // Remove backslash escapes for spaces typical in terminal drag/drop
+    p = p.replace(/\\ /g, ' ');
+    return p;
 }
 
 async function getWavFiles(dir) {
     if (!dir) return [];
-    try {
-        if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
-            return [];
-        }
-        const files = fs.readdirSync(dir);
-        return files
-            .filter(f => f.toUpperCase().endsWith('.WAV'))
-            .sort()
-            .map(f => path.join(dir, f));
-    } catch (err) {
-        return [];
+    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+        throw new Error(`Directory does not exist or is not a folder: ${dir}`);
     }
+    const files = fs.readdirSync(dir);
+    return files
+        .filter(f => f.toUpperCase().endsWith('.WAV'))
+        .sort()
+        .map(f => path.join(dir, f));
 }
 
 function runCommand(command, args, sendLog) {
@@ -91,8 +96,24 @@ app.get('/process', async (req, res) => {
         }
 
         sendLog('Scanning directories...');
-        const files1 = await getWavFiles(card1Dir);
-        const files2 = await getWavFiles(card2Dir);
+        let files1 = [];
+        let files2 = [];
+
+        try {
+            files1 = await getWavFiles(card1Dir);
+        } catch (e) {
+            sendError(e.message);
+            return finish();
+        }
+
+        if (card2Dir) {
+            try {
+                files2 = await getWavFiles(card2Dir);
+            } catch (e) {
+                sendError(e.message);
+                return finish();
+            }
+        }
 
         const allWavFiles = [...files1, ...files2];
 
