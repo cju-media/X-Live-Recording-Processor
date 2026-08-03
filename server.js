@@ -2,6 +2,8 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const ffmpegPath = require('ffmpeg-static');
+const ffprobePath = require('ffprobe-static').path;
 
 const app = express();
 const PORT = 3000;
@@ -57,7 +59,7 @@ function runCommand(command, args, sendLog) {
 
         proc.stderr.on('data', data => {
             const str = data.toString();
-            if (sendLog && command !== 'ffprobe') { // ffprobe logs to stderr by default
+            if (sendLog && command !== ffprobePath) { // ffprobe logs to stderr by default
                 // sendLog(str.trim()); // ffmpeg logs a lot to stderr, omit to avoid swamping UI unless debugging
             }
         });
@@ -141,7 +143,7 @@ app.get('/process', async (req, res) => {
         // Get Channels
         let numChannels;
         try {
-            const channelsStr = await runCommand('ffprobe', [
+            const channelsStr = await runCommand(ffprobePath, [
                 '-v', 'error',
                 '-show_entries', 'stream=channels',
                 '-of', 'default=noprint_wrappers=1:nokey=1',
@@ -159,7 +161,7 @@ app.get('/process', async (req, res) => {
         // Get Bit Depth
         let bitDepth = 24;
         try {
-            const bitDepthStr = await runCommand('ffprobe', [
+            const bitDepthStr = await runCommand(ffprobePath, [
                 '-v', 'error',
                 '-show_entries', 'stream=bits_per_raw_sample,bits_per_sample',
                 '-of', 'default=noprint_wrappers=1:nokey=1',
@@ -214,7 +216,7 @@ app.get('/process', async (req, res) => {
         }
 
         try {
-            await runCommand('ffmpeg', ffmpegArgs, null); // Don't pipe stdout here to avoid swamping UI, ffmpeg logs to stderr anyway
+            await runCommand(ffmpegPath, ffmpegArgs, null); // Don't pipe stdout here to avoid swamping UI, ffmpeg logs to stderr anyway
             sendLog('\nProcessing complete!');
         } catch (err) {
             sendError(`Error during ffmpeg processing: ${err.message}`);
