@@ -142,7 +142,10 @@
             <button onclick="openBrowser('output')">Browse</button>
         </div>
 
-        <button id="processBtn" style="padding: 12px 20px; font-size: 16px; margin-left: 0; margin-top: 10px;">Start Processing</button>
+        <div style="margin-top: 10px;">
+            <button id="processBtn" style="padding: 12px 20px; font-size: 16px; margin-left: 0;">Start Processing</button>
+            <button id="cancelBtn" style="padding: 12px 20px; font-size: 16px; background-color: #dc3545; display: none;">Cancel</button>
+        </div>
     </div>
 
     <div class="section">
@@ -155,8 +158,8 @@
             <div style="margin-bottom: 10px;">
                 <input type="file" id="csvFileInput" accept=".csv" style="display:none;" onchange="uploadCsv()">
                 <button onclick="document.getElementById('csvFileInput').click()">Upload CSV File</button>
-                <button onclick="saveCsvEdits()">Save Edits</button>
                 <button onclick="window.location.href='/api/csv/download'">Download CSV</button>
+                <span style="margin-left: 10px; font-size: 12px; color: #666;">(Edits save automatically)</span>
             </div>
             <div id="csvTableContainer">
                 <table id="csvTable">
@@ -236,7 +239,7 @@
                     }
                     const checkedAttr = shouldProcess ? 'checked' : '';
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${num}</td><td><input type="text" value="${title.replace(/"/g, '&quot;')}" style="width:100%;"></td><td style="text-align: center;"><input type="checkbox" class="process-checkbox" ${checkedAttr}></td>`;
+                    tr.innerHTML = `<td>${num}</td><td><input type="text" value="${title.replace(/"/g, '&quot;')}" style="width:100%;" onchange="saveCsvEdits()"></td><td style="text-align: center;"><input type="checkbox" class="process-checkbox" onchange="saveCsvEdits()" ${checkedAttr}></td>`;
                     tbody.appendChild(tr);
                 }
             }
@@ -256,7 +259,6 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ csvContent })
             });
-            alert('CSV Edits Saved!');
         }
 
         async function uploadCsv() {
@@ -343,6 +345,17 @@
         }
 
         let progressInterval = null;
+        const cancelBtn = document.getElementById('cancelBtn');
+
+        cancelBtn.addEventListener('click', async () => {
+            try {
+                const res = await fetch('/api/cancel');
+                const data = await res.json();
+                appendLog(data.message || 'Cancel requested');
+            } catch (e) {
+                appendLog('Failed to send cancel request.', true);
+            }
+        });
 
         btn.addEventListener('click', async () => {
             const card1 = document.getElementById('card1').value.trim();
@@ -362,6 +375,7 @@
             });
 
             btn.disabled = true;
+            cancelBtn.style.display = 'inline-block';
             logsDiv.innerHTML = '';
             document.getElementById('progressContainer').style.display = 'block';
             document.getElementById('progressBar').style.width = '0%';
@@ -408,6 +422,7 @@
                 if (progressInterval) clearInterval(progressInterval);
                 appendLog('Processing finished.');
                 btn.disabled = false;
+                cancelBtn.style.display = 'none';
                 evtSource.close();
             });
 
@@ -415,6 +430,7 @@
                 if (progressInterval) clearInterval(progressInterval);
                 appendLog('Connection error or processing failed unexpectedly.', true);
                 btn.disabled = false;
+                cancelBtn.style.display = 'none';
                 evtSource.close();
             };
         });
