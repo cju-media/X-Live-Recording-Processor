@@ -382,6 +382,7 @@ app.get('/process', async (req, res) => {
         if (bitDepth === 16) audioCodec = 'pcm_s16le';
         else if (bitDepth === 32) audioCodec = 'pcm_s32le';
 
+        let processingTrackNames = [];
         for (let i = 0; i < numChannels; i++) {
             const trackNum = i + 1;
             const shouldProcess = trackProcessStatus[trackNum] !== false;
@@ -392,9 +393,12 @@ app.get('/process', async (req, res) => {
                 if (!trackName.toLowerCase().endsWith('.wav')) {
                     trackName += '.wav';
                 }
+                processingTrackNames.push(trackName);
                 ffmpegArgs.push(path.join(outputDir, trackName));
             }
         }
+
+        res.write(`event: processingState\ndata: Processing: ${processingTrackNames.join(', ')}\n\n`);
 
         try {
             await runCommand(ffmpegPath, ffmpegArgs, null, (currentSeconds) => {

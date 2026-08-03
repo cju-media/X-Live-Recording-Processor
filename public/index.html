@@ -339,7 +339,10 @@
             }
             logsDiv.appendChild(div);
             logsDiv.scrollTop = logsDiv.scrollHeight;
+            return div; // Return element for updating later if needed
         }
+
+        let progressInterval = null;
 
         btn.addEventListener('click', async () => {
             const card1 = document.getElementById('card1').value.trim();
@@ -373,9 +376,22 @@
 
             evtSource = new EventSource(url);
 
+            if (progressInterval) clearInterval(progressInterval);
+
             evtSource.onmessage = (event) => {
                 appendLog(event.data);
             };
+
+            evtSource.addEventListener('processingState', (event) => {
+                 const logEl = appendLog(event.data);
+                 let dots = 0;
+                 progressInterval = setInterval(() => {
+                     dots = (dots + 1) % 4;
+                     let dotStr = '';
+                     for (let i = 0; i < dots; i++) dotStr += '.';
+                     logEl.textContent = event.data + ' ' + dotStr;
+                 }, 500);
+            });
 
             evtSource.addEventListener('progress', (event) => {
                 const percent = parseFloat(event.data);
@@ -384,16 +400,19 @@
             });
 
             evtSource.addEventListener('errorMsg', (event) => {
+                if (progressInterval) clearInterval(progressInterval);
                 appendLog(`ERROR: ${event.data}`, true);
             });
 
             evtSource.addEventListener('done', (event) => {
+                if (progressInterval) clearInterval(progressInterval);
                 appendLog('Processing finished.');
                 btn.disabled = false;
                 evtSource.close();
             });
 
             evtSource.onerror = (err) => {
+                if (progressInterval) clearInterval(progressInterval);
                 appendLog('Connection error or processing failed unexpectedly.', true);
                 btn.disabled = false;
                 evtSource.close();
