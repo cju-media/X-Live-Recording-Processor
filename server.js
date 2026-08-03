@@ -26,11 +26,22 @@ async function getWavFiles(dir) {
     if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
         throw new Error(`Directory does not exist or is not a folder: ${dir}`);
     }
-    const files = fs.readdirSync(dir);
-    return files
-        .filter(f => f.toUpperCase().endsWith('.WAV'))
-        .sort()
-        .map(f => path.join(dir, f));
+    let wavFiles = [];
+
+    function searchRecursive(currentDir) {
+        const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+        for (const entry of entries) {
+            const fullPath = path.join(currentDir, entry.name);
+            if (entry.isDirectory()) {
+                searchRecursive(fullPath);
+            } else if (entry.isFile() && entry.name.toUpperCase().endsWith('.WAV')) {
+                wavFiles.push(fullPath);
+            }
+        }
+    }
+
+    searchRecursive(dir);
+    return wavFiles.sort();
 }
 
 function runCommand(command, args, sendLog) {
