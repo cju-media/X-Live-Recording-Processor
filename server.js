@@ -25,7 +25,7 @@ if (!fs.existsSync(CONFIG_FILE)) {
 if (!fs.existsSync(CSV_FILE)) {
     let defaultCsv = 'track,title\n';
     for(let i=1; i<=32; i++) {
-        defaultCsv += `${i},Track_${String(i).padStart(2, '0')}\n`;
+        defaultCsv += `${i},Track ${i}\n`;
     }
     fs.writeFileSync(CSV_FILE, defaultCsv);
 }
@@ -69,6 +69,14 @@ app.post('/api/upload-csv', upload.single('csvFile'), (req, res) => {
         res.json({ success: true, csvContent: content });
     } else {
         res.status(400).json({ error: 'No file uploaded' });
+    }
+});
+
+app.get('/api/csv/download', (req, res) => {
+    if (fs.existsSync(CSV_FILE)) {
+        res.download(CSV_FILE, 'track_titles.csv');
+    } else {
+        res.status(404).send('CSV file not found');
     }
 });
 
@@ -123,7 +131,7 @@ async function getWavFiles(dir) {
     return wavFiles.sort();
 }
 
-function runCommand(command, args, sendLog) {
+function runCommand(command, args, sendLog, onProgress) {
     return new Promise((resolve, reject) => {
         const proc = spawn(command, args);
         let output = '';
@@ -136,6 +144,19 @@ function runCommand(command, args, sendLog) {
 
         proc.stderr.on('data', data => {
             const str = data.toString();
+
+            // Try parsing ffmpeg time= progress
+            if (onProgress && command === ffmpegPath) {
+                const timeMatch = str.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
+                if (timeMatch) {
+                    const hours = parseInt(timeMatch[1], 10);
+                    const minutes = parseInt(timeMatch[2], 10);
+                    const seconds = parseFloat(timeMatch[3]);
+                    const currentSeconds = (hours * 3600) + (minutes * 60) + seconds;
+                    onProgress(currentSeconds);
+                }
+            }
+
             if (sendLog && command !== ffprobePath) { // ffprobe logs to stderr by default
                 // sendLog(str.trim()); // ffmpeg logs a lot to stderr, omit to avoid swamping UI unless debugging
             }
@@ -165,6 +186,10 @@ app.get('/process', async (req, res) => {
             res.write(`data: ${line}\n\n`);
         }
     };
+
+    const sendProgress = (percent) => {
+        res.write(`event: progress\ndata: ${percent}\n\n`);
+    }
 
     const sendError = (msg) => {
         res.write(`event: errorMsg\ndata: ${msg}\n\n`);
@@ -213,6 +238,29 @@ app.get('/process', async (req, res) => {
         }
 
         sendLog(`Found ${allWavFiles.length} .WAV file(s) to process.`);
+
+        let totalDurationSeconds = 0;
+        sendLog('Calculating total duration...');
+        for (const file of allWavFiles) {
+            try {
+                const durStr = await runCommand(ffprobePath, [
+                    '-v', 'error',
+                    '-show_entries', 'format=duration',
+                    '-of', 'default=noprint_wrappers=1:nokey=1',
+                    file
+                ]);
+                const dur = parseFloat(durStr);
+                if (!isNaN(dur)) totalDurationSeconds += dur;
+            } catch(err) {
+                 sendLog(`Warning: Could not get duration for ${path.basename(file)}`);
+            }
+        }
+
+        if (totalDurationSeconds > 0) {
+            sendLog(`Total duration to process: ${totalDurationSeconds.toFixed(2)} seconds.`);
+        } else {
+            sendLog(`Warning: Total duration could not be calculated.`);
+        }
 
         const firstFile = allWavFiles[0];
         sendLog(`Analyzing ${path.basename(firstFile)} ...`);
@@ -318,8 +366,15 @@ app.get('/process', async (req, res) => {
         }
 
         try {
-            await runCommand(ffmpegPath, ffmpegArgs, null); // Don't pipe stdout here to avoid swamping UI, ffmpeg logs to stderr anyway
+            await runCommand(ffmpegPath, ffmpegArgs, null, (currentSeconds) => {
+                if (totalDurationSeconds > 0) {
+                    let percent = (currentSeconds / totalDurationSeconds) * 100;
+                    if (percent > 100) percent = 100;
+                    sendProgress(percent.toFixed(2));
+                }
+            });
             sendLog('\nProcessing complete!');
+            sendProgress("100.00");
         } catch (err) {
             sendError(`Error during ffmpeg processing: ${err.message}`);
         } finally {
