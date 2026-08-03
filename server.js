@@ -17,6 +17,8 @@ const upload = multer({ dest: 'uploads/' });
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 const CSV_FILE = path.join(__dirname, 'track_titles.csv');
 
+let activeProcessTracker = { proc: null };
+
 // Initialize files
 if (!fs.existsSync(CONFIG_FILE)) {
     fs.writeFileSync(CONFIG_FILE, JSON.stringify({ card1: '', card2: '', output: '' }, null, 2));
@@ -80,6 +82,20 @@ app.get('/api/csv/download', (req, res) => {
     }
 });
 
+app.get('/api/cancel', (req, res) => {
+    if (activeProcessTracker.proc) {
+        try {
+            activeProcessTracker.proc.kill('SIGKILL');
+            activeProcessTracker.proc = null;
+            res.json({ success: true, message: 'Process cancelled' });
+        } catch (e) {
+            res.status(500).json({ error: 'Failed to cancel process' });
+        }
+    } else {
+        res.json({ success: false, message: 'No active process' });
+    }
+});
+
 // API: Browse Directory
 app.get('/api/browse', (req, res) => {
     let dir = req.query.dir || 'root';
@@ -131,9 +147,12 @@ async function getWavFiles(dir) {
     return wavFiles.sort();
 }
 
-function runCommand(command, args, sendLog, onProgress) {
+function runCommand(command, args, sendLog, onProgress, processTracker) {
     return new Promise((resolve, reject) => {
         const proc = spawn(command, args);
+        if (processTracker) {
+             processTracker.proc = proc;
+        }
         let output = '';
 
         proc.stdout.on('data', data => {
@@ -164,8 +183,13 @@ function runCommand(command, args, sendLog, onProgress) {
 
         proc.on('error', err => reject(err));
         proc.on('close', code => {
+            if (processTracker) {
+                 processTracker.proc = null;
+            }
             if (code === 0) {
                 resolve(output.trim());
+            } else if (code === null) {
+                reject(new Error('Process was cancelled'));
             } else {
                 reject(new Error(`${command} exited with code ${code}`));
             }
@@ -398,7 +422,7 @@ app.get('/process', async (req, res) => {
             }
         }
 
-        res.write(`event: processingState\ndata: Processing: ${processingTrackNames.join(', ')}\n\n`);
+        res.write(`event: processingState\ndata: Simultaneously processing: ${processingTrackNames.join(', ')}\n\n`);
 
         try {
             await runCommand(ffmpegPath, ffmpegArgs, null, (currentSeconds) => {
@@ -407,7 +431,7 @@ app.get('/process', async (req, res) => {
                     if (percent > 100) percent = 100;
                     sendProgress(percent.toFixed(2));
                 }
-            });
+            }, activeProcessTracker);
             sendLog('\nProcessing complete!');
             sendProgress("100.00");
         } catch (err) {
