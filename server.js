@@ -4,11 +4,88 @@ const path = require('path');
 const { spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 const ffprobePath = require('ffprobe-static').path;
+const multer = require('multer');
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
+
+const upload = multer({ dest: 'uploads/' });
+
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+const CSV_FILE = path.join(__dirname, 'track_titles.csv');
+
+// Initialize files
+if (!fs.existsSync(CONFIG_FILE)) {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify({ card1: '', card2: '', output: '' }, null, 2));
+}
+
+if (!fs.existsSync(CSV_FILE)) {
+    let defaultCsv = 'track,title\n';
+    for(let i=1; i<=32; i++) {
+        defaultCsv += `${i},Track_${String(i).padStart(2, '0')}\n`;
+    }
+    fs.writeFileSync(CSV_FILE, defaultCsv);
+}
+
+// API: Config
+app.get('/api/config', (req, res) => {
+    if (fs.existsSync(CONFIG_FILE)) {
+        res.json(JSON.parse(fs.readFileSync(CONFIG_FILE)));
+    } else {
+        res.json({});
+    }
+});
+
+app.post('/api/config', (req, res) => {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(req.body, null, 2));
+    res.json({ success: true });
+});
+
+// API: CSV
+app.get('/api/csv', (req, res) => {
+    if (fs.existsSync(CSV_FILE)) {
+        res.send(fs.readFileSync(CSV_FILE, 'utf-8'));
+    } else {
+        res.send('');
+    }
+});
+
+app.post('/api/csv', (req, res) => {
+    const { csvContent } = req.body;
+    if (csvContent) {
+        fs.writeFileSync(CSV_FILE, csvContent);
+    }
+    res.json({ success: true });
+});
+
+app.post('/api/upload-csv', upload.single('csvFile'), (req, res) => {
+    if (req.file) {
+        const content = fs.readFileSync(req.file.path, 'utf-8');
+        fs.writeFileSync(CSV_FILE, content);
+        fs.unlinkSync(req.file.path);
+        res.json({ success: true, csvContent: content });
+    } else {
+        res.status(400).json({ error: 'No file uploaded' });
+    }
+});
+
+// API: Browse Directory
+app.get('/api/browse', (req, res) => {
+    let dir = req.query.dir || 'root';
+    if (dir === 'root') {
+        dir = path.parse(process.cwd()).root;
+    }
+    try {
+        const items = fs.readdirSync(dir, { withFileTypes: true });
+        const directories = items.filter(item => item.isDirectory() && !item.name.startsWith('.')).map(item => item.name).sort();
+        res.json({ currentDir: dir, directories });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 function cleanPath(inputPath) {
     if (!inputPath) return '';
@@ -193,6 +270,27 @@ app.get('/process', async (req, res) => {
         }).join('\n');
         fs.writeFileSync(concatFilePath, concatContent);
 
+        // Read CSV track titles
+        let trackNames = {};
+        if (fs.existsSync(CSV_FILE)) {
+            const csvContent = fs.readFileSync(CSV_FILE, 'utf-8');
+            const lines = csvContent.split('\n');
+            for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (line) {
+                    const parts = line.split(',');
+                    if (parts.length >= 2) {
+                        const num = parseInt(parts[0].trim(), 10);
+                        const title = parts.slice(1).join(',').trim();
+                        if (!isNaN(num) && title) {
+                            let safeTitle = title.replace(/[/\\?%*:|"<>]/g, '-');
+                            trackNames[num] = safeTitle;
+                        }
+                    }
+                }
+            }
+        }
+
         sendLog('\nStarting ffmpeg processing...');
 
         const ffmpegArgs = ['-f', 'concat', '-safe', '0', '-i', concatFilePath];
@@ -212,7 +310,11 @@ app.get('/process', async (req, res) => {
         for (let i = 0; i < numChannels; i++) {
             ffmpegArgs.push('-map', `[ch${i+1}]`);
             ffmpegArgs.push('-c:a', audioCodec);
-            ffmpegArgs.push(path.join(outputDir, `Track_${String(i+1).padStart(2, '0')}.wav`));
+            let trackName = trackNames[i+1] || `Track_${String(i+1).padStart(2, '0')}`;
+            if (!trackName.toLowerCase().endsWith('.wav')) {
+                trackName += '.wav';
+            }
+            ffmpegArgs.push(path.join(outputDir, trackName));
         }
 
         try {

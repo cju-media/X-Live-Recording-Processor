@@ -7,7 +7,7 @@
     <style>
         body {
             font-family: sans-serif;
-            max-width: 800px;
+            max-width: 900px;
             margin: 0 auto;
             padding: 20px;
             background: #f4f4f9;
@@ -17,27 +17,29 @@
         }
         .form-group {
             margin-bottom: 15px;
+            display: flex;
+            align-items: center;
         }
         label {
-            display: block;
-            margin-bottom: 5px;
+            width: 250px;
             font-weight: bold;
         }
         input[type="text"] {
-            width: 100%;
+            flex-grow: 1;
             padding: 8px;
             box-sizing: border-box;
             border: 1px solid #ccc;
             border-radius: 4px;
         }
         button {
-            padding: 10px 15px;
+            padding: 8px 12px;
             background-color: #007bff;
             color: white;
             border: none;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 16px;
+            font-size: 14px;
+            margin-left: 10px;
         }
         button:hover {
             background-color: #0056b3;
@@ -59,37 +61,244 @@
         .log-line {
             margin: 2px 0;
         }
+        .section {
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .file-browser-modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background: white;
+            padding: 20px;
+            width: 500px;
+            border-radius: 8px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .browser-list {
+            flex-grow: 1;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            margin: 10px 0;
+            padding: 5px;
+        }
+        .browser-item {
+            padding: 5px;
+            cursor: pointer;
+        }
+        .browser-item:hover {
+            background-color: #f0f0f0;
+        }
+        #csvTableContainer {
+            max-height: 300px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>
 
     <h1>X-Live Recording Processor</h1>
-    <p>Enter the absolute directory paths for the SD card folders and the output destination.</p>
 
-    <div class="form-group">
-        <label for="card1">First Card Directory (Required):</label>
-        <input type="text" id="card1" placeholder="/path/to/card1">
+    <div class="section">
+        <h2>Directories</h2>
+        <div class="form-group">
+            <label for="card1">First Card Directory (Required):</label>
+            <input type="text" id="card1" placeholder="/path/to/card1">
+            <button onclick="openBrowser('card1')">Browse</button>
+        </div>
+
+        <div class="form-group">
+            <label for="card2">Second Card Directory (Optional):</label>
+            <input type="text" id="card2" placeholder="/path/to/card2">
+            <button onclick="openBrowser('card2')">Browse</button>
+        </div>
+
+        <div class="form-group">
+            <label for="output">Output Directory (Required):</label>
+            <input type="text" id="output" placeholder="/path/to/output">
+            <button onclick="openBrowser('output')">Browse</button>
+        </div>
+
+        <button id="processBtn" style="padding: 12px 20px; font-size: 16px; margin-left: 0; margin-top: 10px;">Start Processing</button>
     </div>
 
-    <div class="form-group">
-        <label for="card2">Second Card Directory (Optional):</label>
-        <input type="text" id="card2" placeholder="/path/to/card2">
+    <div class="section">
+        <h2>Track Titles (CSV)</h2>
+        <div style="margin-bottom: 10px;">
+            <input type="file" id="csvFileInput" accept=".csv" style="display:none;" onchange="uploadCsv()">
+            <button onclick="document.getElementById('csvFileInput').click()">Upload CSV File</button>
+            <button onclick="saveCsvEdits()">Save Edits</button>
+        </div>
+        <div id="csvTableContainer">
+            <table id="csvTable">
+                <thead><tr><th>Track</th><th>Title</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
     </div>
 
-    <div class="form-group">
-        <label for="output">Output Directory (Required):</label>
-        <input type="text" id="output" placeholder="/path/to/output">
-    </div>
-
-    <button id="processBtn">Start Processing</button>
 
     <div class="logs-container" id="logs"></div>
+
+    <!-- File Browser Modal -->
+    <div id="fileBrowser" class="file-browser-modal">
+        <div class="modal-content">
+            <h3>Select Directory</h3>
+            <div style="display:flex; gap:5px;">
+                <button onclick="navigateBrowserUp()">Up</button>
+                <input type="text" id="browserPath" style="flex-grow:1;" readonly>
+            </div>
+            <div id="browserList" class="browser-list"></div>
+            <div style="text-align: right;">
+                <button onclick="closeBrowser()">Cancel</button>
+                <button onclick="selectBrowserPath()">Select This Folder</button>
+            </div>
+        </div>
+    </div>
 
     <script>
         const btn = document.getElementById('processBtn');
         const logsDiv = document.getElementById('logs');
         let evtSource = null;
+        let activeTargetInput = null;
 
+        // Initialize Data
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                const data = await res.json();
+                if(data.card1) document.getElementById('card1').value = data.card1;
+                if(data.card2) document.getElementById('card2').value = data.card2;
+                if(data.output) document.getElementById('output').value = data.output;
+            } catch(e) { console.error('Error loading config:', e); }
+        }
+
+        async function loadCsv() {
+            try {
+                const res = await fetch('/api/csv');
+                const csvStr = await res.text();
+                renderCsvTable(csvStr);
+            } catch(e) { console.error('Error loading CSV:', e); }
+        }
+
+        function renderCsvTable(csvStr) {
+            const tbody = document.querySelector('#csvTable tbody');
+            tbody.innerHTML = '';
+            const lines = csvStr.split('\n');
+            for(let i=1; i<lines.length; i++) {
+                const line = lines[i].trim();
+                if(line) {
+                    const parts = line.split(',');
+                    const num = parts[0];
+                    const title = parts.slice(1).join(',');
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${num}</td><td><input type="text" value="${title.replace(/"/g, '&quot;')}" style="width:100%;"></td>`;
+                    tbody.appendChild(tr);
+                }
+            }
+        }
+
+        async function saveCsvEdits() {
+            const rows = document.querySelectorAll('#csvTable tbody tr');
+            let csvContent = 'track,title\n';
+            rows.forEach(row => {
+                const num = row.cells[0].innerText;
+                const title = row.cells[1].querySelector('input').value;
+                csvContent += `${num},${title}\n`;
+            });
+            await fetch('/api/csv', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ csvContent })
+            });
+            alert('CSV Edits Saved!');
+        }
+
+        async function uploadCsv() {
+            const fileInput = document.getElementById('csvFileInput');
+            if (fileInput.files.length > 0) {
+                const formData = new FormData();
+                formData.append('csvFile', fileInput.files[0]);
+                const res = await fetch('/api/upload-csv', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.success) {
+                    renderCsvTable(data.csvContent);
+                    fileInput.value = '';
+                }
+            }
+        }
+
+        // File Browser Logic
+        async function fetchBrowse(dirPath) {
+            const res = await fetch(`/api/browse?dir=${encodeURIComponent(dirPath)}`);
+            const data = await res.json();
+            document.getElementById('browserPath').value = data.currentDir;
+            const list = document.getElementById('browserList');
+            list.innerHTML = '';
+            data.directories.forEach(d => {
+                const div = document.createElement('div');
+                div.className = 'browser-item';
+                div.textContent = '📁 ' + d;
+                div.onclick = () => {
+                    let sep = data.currentDir.endsWith('/') || data.currentDir.endsWith('\\') ? '' : '/';
+                    if (data.currentDir.includes('\\')) sep = '\\'; // windows basic compat
+                    fetchBrowse(data.currentDir + sep + d);
+                };
+                list.appendChild(div);
+            });
+        }
+
+        function openBrowser(targetId) {
+            activeTargetInput = targetId;
+            document.getElementById('fileBrowser').style.display = 'flex';
+            let startDir = document.getElementById(targetId).value.trim();
+            if(!startDir) startDir = 'root';
+            fetchBrowse(startDir);
+        }
+
+        function closeBrowser() {
+            document.getElementById('fileBrowser').style.display = 'none';
+        }
+
+        function selectBrowserPath() {
+            if(activeTargetInput) {
+                document.getElementById(activeTargetInput).value = document.getElementById('browserPath').value;
+            }
+            closeBrowser();
+        }
+
+        function navigateBrowserUp() {
+            const current = document.getElementById('browserPath').value;
+            const parts = current.split(/[/\\]/);
+            parts.pop();
+            if(parts.length === 1 && parts[0] === '') fetchBrowse('/');
+            else if(parts.length > 0) fetchBrowse(parts.join('/') || '/');
+        }
+
+        // Processing Logic
         function appendLog(message, isError = false) {
             const div = document.createElement('div');
             div.className = 'log-line';
@@ -101,7 +310,7 @@
             logsDiv.scrollTop = logsDiv.scrollHeight;
         }
 
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', async () => {
             const card1 = document.getElementById('card1').value.trim();
             const card2 = document.getElementById('card2').value.trim();
             const output = document.getElementById('output').value.trim();
@@ -110,6 +319,13 @@
                 alert('First Card Directory and Output Directory are required.');
                 return;
             }
+
+            // Save config
+            await fetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ card1, card2, output })
+            });
 
             btn.disabled = true;
             logsDiv.innerHTML = '';
@@ -143,6 +359,10 @@
                 evtSource.close();
             };
         });
+
+        // Init
+        loadConfig();
+        loadCsv();
     </script>
 </body>
 </html>
