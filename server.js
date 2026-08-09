@@ -16,8 +16,34 @@ const upload = multer({ dest: 'uploads/' });
 
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 const CSV_FILE = path.join(__dirname, 'track_titles.csv');
+const DEBUG_LOG_FILE = path.join(__dirname, 'processing.log');
 
 let activeProcessTracker = { proc: null };
+
+// Persistent, timestamped debug logger. Writes to console AND to a log file
+// on disk so a run can be diagnosed even if the browser/SSE connection never
+// receives anything (e.g. the event loop is blocked by a slow network fs
+// call, or the client disconnects). Check processing.log on the machine
+// running the server if the UI appears to hang with no visible logs.
+function debugLog(msg) {
+    const stamped = `[${new Date().toISOString()}] ${msg}`;
+    console.log(stamped);
+    try {
+        fs.appendFileSync(DEBUG_LOG_FILE, stamped + '\n');
+    } catch (e) {
+        // Don't let logging failures break processing
+        console.error('Failed to write to processing.log:', e.message);
+    }
+}
+
+// Surface crashes instead of letting the process die silently mid-request,
+// which from the browser's perspective looks identical to "hanging".
+process.on('uncaughtException', (err) => {
+    debugLog(`UNCAUGHT EXCEPTION: ${err.stack || err.message}`);
+});
+process.on('unhandledRejection', (reason) => {
+    debugLog(`UNHANDLED REJECTION: ${reason && reason.stack ? reason.stack : reason}`);
+});
 
 // Initialize files
 if (!fs.existsSync(CONFIG_FILE)) {
@@ -124,36 +150,88 @@ function cleanPath(inputPath) {
     return p;
 }
 
-async function getWavFiles(dir) {
+async function getWavFiles(dir, sendLog) {
     if (!dir) return [];
-    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+
+    const log = (msg) => {
+        debugLog(msg);
+        if (sendLog) sendLog(msg);
+    };
+
+    const existsT0 = Date.now();
+    const exists = fs.existsSync(dir);
+    const existsElapsed = Date.now() - existsT0;
+    if (existsElapsed > 500) {
+        log(`  (checking existence of "${dir}" took ${existsElapsed}ms — slow network path?)`);
+    }
+    if (!exists || !fs.statSync(dir).isDirectory()) {
         throw new Error(`Directory does not exist or is not a folder: ${dir}`);
     }
+
     let wavFiles = [];
+    let dirsScanned = 0;
 
     function searchRecursive(currentDir) {
-        const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+        dirsScanned++;
+        log(`Scanning folder #${dirsScanned}: ${currentDir}`);
+
+        let entries;
+        const t0 = Date.now();
+        try {
+            entries = fs.readdirSync(currentDir, { withFileTypes: true });
+        } catch (err) {
+            log(`  WARNING: could not read "${currentDir}": ${err.message} — skipping.`);
+            return;
+        }
+        const elapsed = Date.now() - t0;
+        if (elapsed > 1000) {
+            log(`  NOTE: listing "${currentDir}" (${entries.length} entries) took ${elapsed}ms — the network share may be slow or overloaded.`);
+        }
+
         for (const entry of entries) {
             const fullPath = path.join(currentDir, entry.name);
             if (entry.isDirectory()) {
                 searchRecursive(fullPath);
             } else if (entry.isFile() && entry.name.toUpperCase().endsWith('.WAV')) {
                 wavFiles.push(fullPath);
+                if (wavFiles.length % 25 === 0) {
+                    log(`  ...${wavFiles.length} .WAV file(s) found so far`);
+                }
             }
         }
     }
 
     searchRecursive(dir);
+    log(`Finished scanning ${dirsScanned} folder(s) under "${dir}" — found ${wavFiles.length} .WAV file(s).`);
     return wavFiles.sort();
 }
 
-function runCommand(command, args, sendLog, onProgress, processTracker) {
+function runCommand(command, args, sendLog, onProgress, processTracker, label) {
     return new Promise((resolve, reject) => {
-        const proc = spawn(command, args);
+        const tag = label || path.basename(command);
+        const t0 = Date.now();
+        debugLog(`SPAWN [${tag}]: ${command} ${args.join(' ')}`);
+
+        let proc;
+        try {
+            proc = spawn(command, args);
+        } catch (err) {
+            debugLog(`SPAWN FAILED [${tag}]: ${err.message}`);
+            reject(err);
+            return;
+        }
+
         if (processTracker) {
              processTracker.proc = proc;
         }
         let output = '';
+        let stderrTail = '';
+
+        // If a spawned process never emits stdout/stderr/close, this makes the
+        // stall visible instead of silently sitting at 0% forever.
+        const stallWarnInterval = setInterval(() => {
+            debugLog(`STILL WAITING on [${tag}] after ${((Date.now() - t0) / 1000).toFixed(1)}s (pid ${proc.pid})...`);
+        }, 15000);
 
         proc.stdout.on('data', data => {
             const str = data.toString();
@@ -163,6 +241,7 @@ function runCommand(command, args, sendLog, onProgress, processTracker) {
 
         proc.stderr.on('data', data => {
             const str = data.toString();
+            stderrTail = (stderrTail + str).slice(-4000); // keep last ~4KB for error diagnostics
 
             // Try parsing ffmpeg time= progress
             if (onProgress && command === ffmpegPath) {
@@ -181,17 +260,26 @@ function runCommand(command, args, sendLog, onProgress, processTracker) {
             }
         });
 
-        proc.on('error', err => reject(err));
+        proc.on('error', err => {
+            clearInterval(stallWarnInterval);
+            debugLog(`SPAWN ERROR [${tag}] after ${Date.now() - t0}ms: ${err.message}`);
+            reject(err);
+        });
         proc.on('close', code => {
+            clearInterval(stallWarnInterval);
+            const elapsed = Date.now() - t0;
             if (processTracker) {
                  processTracker.proc = null;
             }
             if (code === 0) {
+                debugLog(`DONE [${tag}] in ${elapsed}ms`);
                 resolve(output.trim());
             } else if (code === null) {
+                debugLog(`CANCELLED [${tag}] after ${elapsed}ms`);
                 reject(new Error('Process was cancelled'));
             } else {
-                reject(new Error(`${command} exited with code ${code}`));
+                debugLog(`FAILED [${tag}] after ${elapsed}ms, exit code ${code}. stderr tail: ${stderrTail.trim()}`);
+                reject(new Error(`${command} exited with code ${code}${stderrTail.trim() ? ` — ${stderrTail.trim().split('\n').pop()}` : ''}`));
             }
         });
     });
@@ -208,18 +296,29 @@ app.get('/process', async (req, res) => {
         const lines = msg.split('\n');
         for (const line of lines) {
             res.write(`data: ${line}\n\n`);
+            if (line.trim()) debugLog(`[SSE] ${line}`);
         }
     };
 
     const sendProgress = (percent) => {
         res.write(`event: progress\ndata: ${percent}\n\n`);
+        debugLog(`[SSE] progress: ${percent}%`);
     }
 
     const sendError = (msg) => {
         res.write(`event: errorMsg\ndata: ${msg}\n\n`);
+        debugLog(`[SSE] ERROR: ${msg}`);
     };
 
+    // Periodic heartbeat so the browser/proxy sees the connection is alive
+    // even during long gaps between steps, and so processing.log gets a
+    // steady drip of "still running" markers to bound how stale a stall is.
+    const heartbeat = setInterval(() => {
+        res.write(`: heartbeat ${new Date().toISOString()}\n\n`);
+    }, 10000);
+
     const finish = () => {
+        clearInterval(heartbeat);
         res.write(`event: done\ndata: ok\n\n`);
         res.end();
     };
@@ -229,25 +328,32 @@ app.get('/process', async (req, res) => {
         const card2Dir = cleanPath(req.query.card2);
         const outputDir = cleanPath(req.query.output);
 
+        debugLog(`/process request received. card1="${card1Dir}" card2="${card2Dir}" output="${outputDir}"`);
+
         if (!card1Dir || !outputDir) {
             sendError('First Card directory and Output directory are required.');
             return finish();
         }
 
-        sendLog('Scanning directories...');
+        sendLog(`Scanning "${card1Dir}"...`);
         let files1 = [];
         let files2 = [];
 
         try {
-            files1 = await getWavFiles(card1Dir);
+            const t0 = Date.now();
+            files1 = await getWavFiles(card1Dir, sendLog);
+            sendLog(`Scan of "${card1Dir}" took ${((Date.now() - t0) / 1000).toFixed(1)}s.`);
         } catch (e) {
             sendError(e.message);
             return finish();
         }
 
         if (card2Dir) {
+            sendLog(`Scanning "${card2Dir}"...`);
             try {
-                files2 = await getWavFiles(card2Dir);
+                const t0 = Date.now();
+                files2 = await getWavFiles(card2Dir, sendLog);
+                sendLog(`Scan of "${card2Dir}" took ${((Date.now() - t0) / 1000).toFixed(1)}s.`);
             } catch (e) {
                 sendError(e.message);
                 return finish();
@@ -265,18 +371,25 @@ app.get('/process', async (req, res) => {
 
         let totalDurationSeconds = 0;
         sendLog('Calculating total duration...');
-        for (const file of allWavFiles) {
+        for (let i = 0; i < allWavFiles.length; i++) {
+            const file = allWavFiles[i];
+            const fileT0 = Date.now();
+            sendLog(`  Probing duration [${i + 1}/${allWavFiles.length}]: ${path.basename(file)}`);
             try {
                 const durStr = await runCommand(ffprobePath, [
                     '-v', 'error',
                     '-show_entries', 'format=duration',
                     '-of', 'default=noprint_wrappers=1:nokey=1',
                     file
-                ]);
+                ], null, null, null, `ffprobe-duration ${path.basename(file)}`);
                 const dur = parseFloat(durStr);
+                const fileElapsed = Date.now() - fileT0;
                 if (!isNaN(dur)) totalDurationSeconds += dur;
+                if (fileElapsed > 2000) {
+                    sendLog(`    -> ${dur.toFixed(2)}s (took ${(fileElapsed / 1000).toFixed(1)}s — slower than expected, check the network path)`);
+                }
             } catch(err) {
-                 sendLog(`Warning: Could not get duration for ${path.basename(file)}`);
+                 sendLog(`  Warning: Could not get duration for ${path.basename(file)} (after ${Date.now() - fileT0}ms): ${err.message}`);
             }
         }
 
@@ -297,7 +410,7 @@ app.get('/process', async (req, res) => {
                 '-show_entries', 'stream=channels',
                 '-of', 'default=noprint_wrappers=1:nokey=1',
                 firstFile
-            ]);
+            ], null, null, null, 'ffprobe-channels');
             numChannels = parseInt(channelsStr);
             if (isNaN(numChannels) || numChannels <= 0) throw new Error("Invalid channel count");
         } catch (err) {
@@ -315,7 +428,7 @@ app.get('/process', async (req, res) => {
                 '-show_entries', 'stream=bits_per_raw_sample,bits_per_sample',
                 '-of', 'default=noprint_wrappers=1:nokey=1',
                 firstFile
-            ]);
+            ], null, null, null, 'ffprobe-bitdepth');
 
             const lines = bitDepthStr.split('\n').map(l => l.trim()).filter(l => l && l !== 'N/A');
             if (lines.length > 0) {
@@ -330,9 +443,14 @@ app.get('/process', async (req, res) => {
 
         sendLog(`Detected bit depth: ${bitDepth}`);
 
-        if (!fs.existsSync(outputDir)) {
-            sendLog(`Creating output directory: ${outputDir}`);
-            fs.mkdirSync(outputDir, { recursive: true });
+        try {
+            if (!fs.existsSync(outputDir)) {
+                sendLog(`Creating output directory: ${outputDir}`);
+                fs.mkdirSync(outputDir, { recursive: true });
+            }
+        } catch (err) {
+            sendError(`Failed to create/access output directory "${outputDir}": ${err.message}`);
+            return finish();
         }
 
         const concatFilePath = path.join(outputDir, 'concat_list.txt');
@@ -340,7 +458,15 @@ app.get('/process', async (req, res) => {
             let absPath = path.resolve(f).replace(/\\/g, '/');
             return `file '${absPath.replace(/'/g, "'\\''")}'`;
         }).join('\n');
-        fs.writeFileSync(concatFilePath, concatContent);
+        try {
+            const t0 = Date.now();
+            fs.writeFileSync(concatFilePath, concatContent);
+            const elapsed = Date.now() - t0;
+            sendLog(`Wrote concat list to "${concatFilePath}" (${elapsed}ms).`);
+        } catch (err) {
+            sendError(`Failed to write concat list to "${concatFilePath}": ${err.message}`);
+            return finish();
+        }
 
         // Read CSV track titles
         let trackNames = {};
@@ -423,25 +549,43 @@ app.get('/process', async (req, res) => {
         }
 
         res.write(`event: processingState\ndata: Simultaneously processing: ${processingTrackNames.join(', ')}\n\n`);
+        debugLog(`ffmpeg command: ${ffmpegPath} ${ffmpegArgs.join(' ')}`);
+
+        // If ffmpeg is stuck (e.g. hung reading from an unresponsive network
+        // mount) it stays silent on stderr and no time= progress ever comes
+        // through, which otherwise looks identical to "not started". Warn
+        // explicitly if no progress line has arrived in a while.
+        let lastProgressAt = Date.now();
+        const noProgressWarnInterval = setInterval(() => {
+            const idleSec = (Date.now() - lastProgressAt) / 1000;
+            if (idleSec > 20) {
+                sendLog(`  ...no ffmpeg progress in ${idleSec.toFixed(0)}s (still running, pid tracked). If this continues, ffmpeg may be stuck reading a source file over the network.`);
+            }
+        }, 15000);
 
         try {
+            const ffmpegT0 = Date.now();
+            sendLog(`Running ffmpeg (this can take a while for large/slow-network files)...`);
             await runCommand(ffmpegPath, ffmpegArgs, null, (currentSeconds) => {
+                lastProgressAt = Date.now();
                 if (totalDurationSeconds > 0) {
                     let percent = (currentSeconds / totalDurationSeconds) * 100;
                     if (percent > 100) percent = 100;
                     sendProgress(percent.toFixed(2));
                 }
-            }, activeProcessTracker);
-            sendLog('\nProcessing complete!');
+            }, activeProcessTracker, 'ffmpeg-encode');
+            sendLog(`\nProcessing complete! (ffmpeg took ${((Date.now() - ffmpegT0) / 1000).toFixed(1)}s)`);
             sendProgress("100.00");
         } catch (err) {
             sendError(`Error during ffmpeg processing: ${err.message}`);
         } finally {
+            clearInterval(noProgressWarnInterval);
             if (fs.existsSync(concatFilePath)) {
                 fs.unlinkSync(concatFilePath);
             }
         }
     } catch (e) {
+        debugLog(`UNEXPECTED ERROR in /process: ${e.stack || e.message}`);
         sendError(`Unexpected error: ${e.message}`);
     }
 
