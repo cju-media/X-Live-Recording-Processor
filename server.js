@@ -251,7 +251,7 @@ function runCommand(command, args, sendLog, onProgress, processTracker, label) {
             const str = data.toString();
             stderrTail = (stderrTail + str).slice(-4000); // keep last ~4KB for error diagnostics
 
-            // Try parsing ffmpeg time= progress
+            // Try parsing ffmpeg time= (and speed=) progress
             let isStatsLine = false;
             if (onProgress && command === ffmpegPath) {
                 const timeMatch = str.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
@@ -261,7 +261,11 @@ function runCommand(command, args, sendLog, onProgress, processTracker, label) {
                     const minutes = parseInt(timeMatch[2], 10);
                     const seconds = parseFloat(timeMatch[3]);
                     const currentSeconds = (hours * 3600) + (minutes * 60) + seconds;
-                    onProgress(currentSeconds);
+                    // ffmpeg's own encode-speed multiplier, e.g. "speed=5.8x".
+                    // Absent/"N/A" during the first stats line or two.
+                    const speedMatch = str.match(/speed=\s*([\d.]+)x/);
+                    const ffmpegSpeed = speedMatch ? parseFloat(speedMatch[1]) : null;
+                    onProgress(currentSeconds, ffmpegSpeed);
                 }
             }
 
@@ -320,9 +324,14 @@ app.get('/process', async (req, res) => {
         }
     };
 
-    const sendProgress = (percent) => {
-        res.write(`event: progress\ndata: ${percent}\n\n`);
-        debugLog(`[SSE] progress: ${percent}%`);
+    // etaSeconds/speed are optional — only present while ffmpeg is actively
+    // encoding and a rate estimate is available.
+    const sendProgress = (percent, etaSeconds, speed) => {
+        const payload = { percent: parseFloat(percent) };
+        if (etaSeconds != null && isFinite(etaSeconds)) payload.etaSeconds = Math.round(etaSeconds);
+        if (speed != null && isFinite(speed) && speed > 0) payload.speed = Math.round(speed * 100) / 100;
+        res.write(`event: progress\ndata: ${JSON.stringify(payload)}\n\n`);
+        debugLog(`[SSE] progress: ${JSON.stringify(payload)}`);
     }
 
     const sendError = (msg) => {
@@ -595,12 +604,27 @@ app.get('/process', async (req, res) => {
         try {
             const ffmpegT0 = Date.now();
             sendLog(`Running ffmpeg (this can take a while for large/slow-network files)...`);
-            await runCommand(ffmpegPath, ffmpegArgs, null, (currentSeconds) => {
+            await runCommand(ffmpegPath, ffmpegArgs, null, (currentSeconds, ffmpegSpeed) => {
                 lastProgressAt = Date.now();
                 if (totalDurationSeconds > 0) {
                     let percent = (currentSeconds / totalDurationSeconds) * 100;
                     if (percent > 100) percent = 100;
-                    sendProgress(percent.toFixed(2));
+
+                    // Prefer ffmpeg's own reported speed (matches what shows up
+                    // in processing.log); fall back to our own measured average
+                    // (content seconds processed / wall-clock seconds elapsed)
+                    // for the first stats line or two, before ffmpeg reports one.
+                    const elapsedWallSec = (Date.now() - ffmpegT0) / 1000;
+                    let effectiveSpeed = ffmpegSpeed;
+                    if (!effectiveSpeed || effectiveSpeed <= 0) {
+                        effectiveSpeed = elapsedWallSec > 0 ? currentSeconds / elapsedWallSec : null;
+                    }
+                    const remainingContentSec = Math.max(totalDurationSeconds - currentSeconds, 0);
+                    const etaSeconds = (effectiveSpeed && effectiveSpeed > 0)
+                        ? remainingContentSec / effectiveSpeed
+                        : null;
+
+                    sendProgress(percent.toFixed(2), etaSeconds, effectiveSpeed);
                 }
             }, activeProcessTracker, 'ffmpeg-encode');
             sendLog(`\nProcessing complete! (ffmpeg took ${((Date.now() - ffmpegT0) / 1000).toFixed(1)}s)`);
