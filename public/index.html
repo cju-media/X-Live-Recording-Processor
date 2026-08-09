@@ -199,6 +199,47 @@
         let evtSource = null;
         let activeTargetInput = null;
 
+        // Heartbeat: this tab is opened by the OS's own "open" command (not window.open()), so
+        // when the app quits - Cmd+Q, Dock Quit, or the packaged app's process exiting some
+        // other way - there is no ordinary event that tells the page its server just died; it
+        // would otherwise just sit there looking frozen, with every button quietly failing.
+        // Poll a trivial endpoint instead of holding a persistent connection open, since a
+        // short-lived request survives page backgrounding/laptop sleep better than a socket a
+        // browser may itself have quietly dropped for unrelated reasons.
+        let heartbeatInterval = null;
+        let missedPings = 0;
+        const HEARTBEAT_INTERVAL_MS = 2000;
+        const HEARTBEAT_TIMEOUT_MS = 1500;
+        const MISSED_PINGS_BEFORE_SHUTDOWN = 2; // avoid a false positive on one slow/dropped request
+
+        async function pingServer() {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), HEARTBEAT_TIMEOUT_MS);
+            try {
+                await fetch('/api/ping', { signal: controller.signal, cache: 'no-store' });
+                missedPings = 0;
+            } catch (e) {
+                missedPings++;
+                if (missedPings >= MISSED_PINGS_BEFORE_SHUTDOWN) {
+                    showAppQuitMessage();
+                }
+            } finally {
+                clearTimeout(timeout);
+            }
+        }
+
+        function showAppQuitMessage() {
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
+            if (evtSource) evtSource.close();
+            document.body.innerHTML = '<div style="text-align:center; margin-top:15%; font-family:sans-serif; color:#666;"><h1>X-Live Processor has quit</h1><p>You can close this tab.</p></div>';
+
+            // Best-effort auto-close: browsers only allow window.close() on a tab that was
+            // opened by script (window.open()), and this one was opened by the OS's own "open"
+            // command instead, so most browsers will just silently ignore this - the message
+            // above is the part that's actually guaranteed to show.
+            setTimeout(() => { try { window.close(); } catch (e) { /* not closable - message above stands */ } }, 1000);
+        }
+
         // Initialize Data
         async function loadConfig() {
             try {
@@ -482,6 +523,7 @@
         // Init
         loadConfig();
         loadCsv();
+        heartbeatInterval = setInterval(pingServer, HEARTBEAT_INTERVAL_MS);
     </script>
 </body>
 </html>

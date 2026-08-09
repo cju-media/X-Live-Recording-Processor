@@ -1,2 +1,11 @@
 node_modules/
 processing.log
+.DS_Store
+
+# Build output from packaging/build_mac.sh - regenerated from source each build, not checked in.
+packaging/dist-mac/
+packaging/dist-node/
+packaging/dist-ffmpeg/
+packaging/dist-wrapper/
+packaging/AppIcon.iconset/
+packaging/AppIcon.icns

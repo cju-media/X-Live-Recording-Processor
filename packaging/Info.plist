@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>X-Live Processor</string>
+    <key>CFBundleDisplayName</key>
+    <string>X-Live Processor</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.xliveprocessor.app</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <!-- Points at packaging/AppWrapper.swift's compiled output, NOT xlive-processor directly.
+         xlive-processor is a bare pkg-built Node executable with no AppKit/Cocoa involvement, so
+         as CFBundleExecutable it can launch but can never behave like a normal Mac app in the
+         Dock: the Dock only stops bouncing an icon once the process signals "I'm a real GUI app
+         and I'm ready" via AppKit, which a plain command-line binary never does - its icon just
+         bounces forever. The Swift wrapper IS a real (windowless) AppKit app, so it settles in
+         the Dock normally and launches xlive-processor as a child process; Cmd+Q/Dock Quit then
+         deliver a proper Apple Event to the wrapper (see applicationShouldTerminate in
+         AppWrapper.swift), which forwards a clean SIGTERM to xlive-processor - triggering
+         server.js's own gracefulShutdown() (kills any in-flight ffmpeg run before exiting) -
+         rather than leaving Cmd+Q/Dock Quit with a non-cooperating process to guess at. -->
+    <key>CFBundleExecutable</key>
+    <string>xlive-processor-launcher</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.music</string>
+</dict>
+</plist>

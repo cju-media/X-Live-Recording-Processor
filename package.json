@@ -2,8 +2,10 @@
   "name": "app",
   "version": "1.0.0",
   "description": "",
-  "main": "process_xlive.js",
+  "main": "server.js",
+  "bin": "server.js",
   "scripts": {
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -22,6 +24,12 @@
     "express": "^5.2.1",
     "ffmpeg-static": "^5.3.0",
     "ffprobe-static": "^3.1.0",
-    "multer": "^2.2.0"
+    "multer": "^2.2.0",
+    "open": "^8.4.2"
+  },
+  "pkg": {
+    "assets": [
+      "public/**/*"
+    ]
   }
 }

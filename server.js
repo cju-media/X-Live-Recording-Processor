@@ -1,10 +1,43 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { spawn } = require('child_process');
-const ffmpegPath = require('ffmpeg-static');
-const ffprobePath = require('ffprobe-static').path;
+const ffmpegStaticPath = require('ffmpeg-static');
+const ffprobeStaticPath = require('ffprobe-static').path;
 const multer = require('multer');
+const open = require('open');
+
+// True when running inside a pkg-built standalone executable (pkg sets this itself).
+// Packaging changes two things: __dirname points into a read-only embedded snapshot instead of
+// a real directory (so writable/bundled files need a different home), and ffmpeg/ffprobe need to
+// come from real files on disk rather than the ffmpeg-static/ffprobe-static npm packages.
+const IS_PACKAGED = !!process.pkg;
+
+// Directory containing bundled app resources (ffmpeg, ffprobe) - these ship as part of the app
+// itself, not user data. This is the folder the packaged executable lives in; in dev it's just
+// the project directory.
+const EXECUTABLE_DIR = IS_PACKAGED ? path.dirname(process.execPath) : __dirname;
+
+// Directory for user data that must survive the app being replaced/updated (config.json,
+// track_titles.csv, processing.log, uploads). Deliberately NOT the same as EXECUTABLE_DIR when
+// packaged: a macOS .app is conventionally treated as disposable/replaceable (dragging a new
+// build over the old one, or even just deleting and reinstalling), and anything written inside
+// the bundle itself would be lost when that happens. ~/Library/Application Support is the
+// standard macOS location for exactly this kind of per-app persistent data. In dev it's just the
+// project directory, same as before.
+const WRITABLE_DIR = IS_PACKAGED
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'X-Live Processor')
+    : __dirname;
+if (IS_PACKAGED) {
+    fs.mkdirSync(WRITABLE_DIR, { recursive: true });
+}
+
+// When packaged, ffmpeg-static/ffprobe-static's own binaries live inside pkg's read-only
+// snapshot filesystem and can't be spawned directly (child_process.spawn needs a real path on
+// disk) - use the copies build_mac.sh places next to the executable instead.
+const ffmpegPath = IS_PACKAGED ? path.join(EXECUTABLE_DIR, 'resources', 'ffmpeg') : ffmpegStaticPath;
+const ffprobePath = IS_PACKAGED ? path.join(EXECUTABLE_DIR, 'resources', 'ffprobe') : ffprobeStaticPath;
 
 const app = express();
 const PORT = 1797;
@@ -12,11 +45,13 @@ const PORT = 1797;
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
-const upload = multer({ dest: 'uploads/' });
+const UPLOADS_DIR = path.join(WRITABLE_DIR, 'uploads');
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+const upload = multer({ dest: UPLOADS_DIR });
 
-const CONFIG_FILE = path.join(__dirname, 'config.json');
-const CSV_FILE = path.join(__dirname, 'track_titles.csv');
-const DEBUG_LOG_FILE = path.join(__dirname, 'processing.log');
+const CONFIG_FILE = path.join(WRITABLE_DIR, 'config.json');
+const CSV_FILE = path.join(WRITABLE_DIR, 'track_titles.csv');
+const DEBUG_LOG_FILE = path.join(WRITABLE_DIR, 'processing.log');
 
 let activeProcessTracker = { proc: null };
 
@@ -57,6 +92,11 @@ if (!fs.existsSync(CSV_FILE)) {
     }
     fs.writeFileSync(CSV_FILE, defaultCsv);
 }
+
+// Lightweight liveness check the frontend polls to notice the app quitting (Cmd+Q, Dock Quit,
+// or the packaged app's process exiting some other way) - see the heartbeat poll in
+// public/index.html for why a plain poll is used instead of a persistent connection.
+app.get('/api/ping', (req, res) => res.json({ ok: true }));
 
 // API: Config
 app.get('/api/config', (req, res) => {
@@ -645,6 +685,36 @@ app.get('/process', async (req, res) => {
     finish();
 });
 
+// Stops any in-flight ffmpeg run and exits. Shared by the OS-signal handlers below so that
+// quitting the app (Dock icon, Cmd+Q, the native wrapper forwarding SIGTERM, Ctrl+C in dev)
+// doesn't leave an orphaned ffmpeg process behind, still writing to files in the output folder.
+function gracefulShutdown(reason) {
+    debugLog(`Shutting down (${reason}).`);
+    if (activeProcessTracker.proc) {
+        try {
+            activeProcessTracker.proc.kill('SIGKILL');
+        } catch (e) {
+            // already gone
+        }
+    }
+    process.exit(0);
+}
+
+// Dock icon Quit / Cmd+Q reach here as SIGTERM via the native launcher wrapper (this app has no
+// window and isn't itself a Cocoa/AppKit app). SIGINT covers Ctrl+C when running "node server.js"
+// directly in a terminal during dev. Without these, either would bypass gracefulShutdown()
+// entirely and go straight to Node's default behavior (an immediate exit with no cleanup).
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 app.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
+    debugLog(`Server running at http://localhost:${PORT}`);
+    if (IS_PACKAGED) {
+        // End users running the packaged app don't know (or need to know) about localhost ports
+        // - open the GUI for them automatically. Left out in dev mode so it doesn't pop a
+        // browser tab on every "node server.js" restart during development.
+        open(`http://localhost:${PORT}`).catch(err => {
+            debugLog(`Failed to auto-open browser: ${err.message}`);
+        });
+    }
 });
