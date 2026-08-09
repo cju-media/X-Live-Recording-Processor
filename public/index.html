@@ -425,12 +425,23 @@
                 let data;
                 try {
                     data = JSON.parse(event.data);
+                    // JSON.parse succeeds on a bare number too (e.g. an older
+                    // server sending plain "45.23"), which yields a number
+                    // primitive rather than {percent: ...}. Normalize that case.
+                    if (typeof data === 'number') data = { percent: data };
                 } catch (e) {
-                    data = { percent: parseFloat(event.data) }; // fallback for old plain-number format
+                    // Not valid JSON at all — fall back to reading it as a raw
+                    // number (older server format). If that also fails, don't
+                    // touch the DOM with NaN; just skip this update and keep
+                    // whatever was last shown.
+                    const n = parseFloat(event.data);
+                    data = { percent: isNaN(n) ? null : n };
                 }
                 const percent = data.percent;
-                document.getElementById('progressBar').style.width = `${percent}%`;
-                document.getElementById('progressBar').textContent = `${percent}%`;
+                if (percent != null && isFinite(percent)) {
+                    document.getElementById('progressBar').style.width = `${percent}%`;
+                    document.getElementById('progressBar').textContent = `${percent}%`;
+                }
 
                 const etaEl = document.getElementById('etaText');
                 if (data.etaSeconds != null) {
