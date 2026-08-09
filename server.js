@@ -214,7 +214,15 @@ function runCommand(command, args, sendLog, onProgress, processTracker, label) {
 
         let proc;
         try {
-            proc = spawn(command, args);
+            // stdin is explicitly closed ('ignore') so that if ffmpeg ever ends up
+            // asking an interactive question on stderr (e.g. the classic
+            // "File already exists. Overwrite? [y/N]" prompt when -y is missing
+            // and an output file already exists from a prior run), it hits EOF
+            // immediately instead of blocking forever on a stdin pipe nobody
+            // writes to. This alone turns a silent infinite hang into a fast,
+            // visible failure. -y/-nostdin below are the primary fix; this is a
+            // belt-and-suspenders backstop.
+            proc = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
         } catch (err) {
             debugLog(`SPAWN FAILED [${tag}]: ${err.message}`);
             reject(err);
@@ -244,9 +252,11 @@ function runCommand(command, args, sendLog, onProgress, processTracker, label) {
             stderrTail = (stderrTail + str).slice(-4000); // keep last ~4KB for error diagnostics
 
             // Try parsing ffmpeg time= progress
+            let isStatsLine = false;
             if (onProgress && command === ffmpegPath) {
                 const timeMatch = str.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
                 if (timeMatch) {
+                    isStatsLine = true;
                     const hours = parseInt(timeMatch[1], 10);
                     const minutes = parseInt(timeMatch[2], 10);
                     const seconds = parseFloat(timeMatch[3]);
@@ -255,8 +265,18 @@ function runCommand(command, args, sendLog, onProgress, processTracker, label) {
                 }
             }
 
-            if (sendLog && command !== ffprobePath) { // ffprobe logs to stderr by default
-                // sendLog(str.trim()); // ffmpeg logs a lot to stderr, omit to avoid swamping UI unless debugging
+            // Always capture ffmpeg's raw stderr to the debug log (never to the
+            // browser SSE stream, which would get swamped). Routine per-second
+            // stats lines are throttled to avoid flooding the file; anything
+            // else — warnings, errors, and critically an interactive prompt
+            // like "Overwrite? [y/N]" — is logged immediately in full so a
+            // stall is never silent again.
+            if (command === ffmpegPath) {
+                const now = Date.now();
+                if (!isStatsLine || !proc._lastStatsLogAt || now - proc._lastStatsLogAt > 5000) {
+                    debugLog(`[ffmpeg stderr] ${str.trim()}`);
+                    if (isStatsLine) proc._lastStatsLogAt = now;
+                }
             }
         });
 
@@ -506,7 +526,16 @@ app.get('/process', async (req, res) => {
 
         sendLog('\nStarting ffmpeg processing...');
 
-        const ffmpegArgs = ['-f', 'concat', '-safe', '0', '-i', concatFilePath];
+        // -y: auto-overwrite existing output files without prompting.
+        // -nostdin: disable ffmpeg's interactive stdin console entirely.
+        // Without these, if an output .wav from a prior run already exists,
+        // ffmpeg prints "File already exists. Overwrite? [y/N]" to stderr and
+        // blocks reading an answer from stdin — which we never write to. That
+        // is a silent, permanent hang: the process stays alive (so it looks
+        // like it's "still running") but never produces another byte of
+        // output. This was the root cause of hangs after a retried run left
+        // partial output files in the destination folder.
+        const ffmpegArgs = ['-y', '-nostdin', '-f', 'concat', '-safe', '0', '-i', concatFilePath];
 
         let filterComplex = '';
         for (let i = 0; i < numChannels; i++) {
