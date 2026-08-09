@@ -36,6 +36,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Fires when the user clicks the Dock icon (or double-clicks the app again in Finder/
+    // Launchpad) while it's already running - the standard way macOS asks a backgrounded app to
+    // put itself back in front of the user. This app has no window for AppKit to restore, so
+    // without this the click would just silently do nothing, leaving anyone who closed their
+    // browser tab with no way back to the GUI short of quitting and relaunching the whole app.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Keep in sync with PORT in server.js.
+        NSWorkspace.shared.open(URL(string: "http://localhost:1797")!)
+        return true
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let child, child.isRunning else { return .terminateNow }
 

@@ -7,6 +7,11 @@ TO RUN:
   Double-click "X-Live Processor.app". It appears in the Dock like a normal app, but has no
   window of its own - after a moment your browser opens automatically to the app instead.
 
+IF YOU CLOSE THE BROWSER TAB/WINDOW:
+  The app keeps running in the Dock - closing the browser window doesn't quit it. Click its
+  Dock icon again (or double-click "X-Live Processor.app" again) to reopen the browser tab
+  without restarting the app itself.
+
 TO SEE LOGS / TROUBLESHOOT:
   A full log of every run (including ffmpeg's own output) is written to processing.log inside
   ~/Library/Application Support/X-Live Processor/ - open that file if the app appears to hang
