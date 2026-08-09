@@ -173,6 +173,7 @@
     <div style="margin-top: 20px; background: #e0e0e0; border-radius: 4px; overflow: hidden; height: 25px; display: none;" id="progressContainer">
         <div id="progressBar" style="width: 0%; height: 100%; background: #28a745; transition: width 0.2s; text-align: center; color: black; font-weight: bold; line-height: 25px;">0%</div>
     </div>
+    <div id="etaText" style="margin-top: 6px; font-size: 13px; color: #555; display: none;"></div>
 
     <div class="logs-container" id="logs"></div>
 
@@ -344,6 +345,16 @@
             return div; // Return element for updating later if needed
         }
 
+        function formatDuration(totalSeconds) {
+            totalSeconds = Math.max(0, Math.round(totalSeconds));
+            const h = Math.floor(totalSeconds / 3600);
+            const m = Math.floor((totalSeconds % 3600) / 60);
+            const s = totalSeconds % 60;
+            if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+            if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+            return `${s}s`;
+        }
+
         let progressInterval = null;
         const cancelBtn = document.getElementById('cancelBtn');
 
@@ -380,6 +391,9 @@
             document.getElementById('progressContainer').style.display = 'block';
             document.getElementById('progressBar').style.width = '0%';
             document.getElementById('progressBar').textContent = '0%';
+            const etaEl = document.getElementById('etaText');
+            etaEl.style.display = 'none';
+            etaEl.textContent = '';
             appendLog('Starting processing...');
 
             const url = `/process?card1=${encodeURIComponent(card1)}&card2=${encodeURIComponent(card2)}&output=${encodeURIComponent(output)}`;
@@ -408,18 +422,36 @@
             });
 
             evtSource.addEventListener('progress', (event) => {
-                const percent = parseFloat(event.data);
+                let data;
+                try {
+                    data = JSON.parse(event.data);
+                } catch (e) {
+                    data = { percent: parseFloat(event.data) }; // fallback for old plain-number format
+                }
+                const percent = data.percent;
                 document.getElementById('progressBar').style.width = `${percent}%`;
                 document.getElementById('progressBar').textContent = `${percent}%`;
+
+                const etaEl = document.getElementById('etaText');
+                if (data.etaSeconds != null) {
+                    let text = `Estimated time remaining: ${formatDuration(data.etaSeconds)}`;
+                    if (data.speed != null) text += ` (at ${data.speed}x speed)`;
+                    etaEl.textContent = text;
+                    etaEl.style.display = 'block';
+                } else {
+                    etaEl.style.display = 'none';
+                }
             });
 
             evtSource.addEventListener('errorMsg', (event) => {
                 if (progressInterval) clearInterval(progressInterval);
+                document.getElementById('etaText').style.display = 'none';
                 appendLog(`ERROR: ${event.data}`, true);
             });
 
             evtSource.addEventListener('done', (event) => {
                 if (progressInterval) clearInterval(progressInterval);
+                document.getElementById('etaText').style.display = 'none';
                 appendLog('Processing finished.');
                 btn.disabled = false;
                 cancelBtn.style.display = 'none';
@@ -428,6 +460,7 @@
 
             evtSource.onerror = (err) => {
                 if (progressInterval) clearInterval(progressInterval);
+                document.getElementById('etaText').style.display = 'none';
                 appendLog('Connection error or processing failed unexpectedly.', true);
                 btn.disabled = false;
                 cancelBtn.style.display = 'none';
